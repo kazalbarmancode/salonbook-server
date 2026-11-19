@@ -344,6 +344,7 @@ app.post("/appointments", async (req, res) => {
       message,
     } = req.body;
 
+    // 1. Required field validation
     if (!userId || !serviceId || !appointmentDate || !timeSlot) {
       return res.status(400).json({
         success: false,
@@ -351,6 +352,42 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
+    // 2. Check customer account
+    const userConditions = [
+      { id: userId },
+      { _id: userId },
+    ];
+
+    if (ObjectId.isValid(userId)) {
+      userConditions.push({
+        _id: new ObjectId(userId),
+      });
+    }
+
+    const customer = await usersCollection.findOne({
+      $or: userConditions,
+    });
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer account not found",
+      });
+    }
+
+    // 3. Blocked user check
+    if (
+      customer.isBlocked === true ||
+      customer.banned === true
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your account has been blocked. You cannot book appointments.",
+      });
+    }
+
+    // 4. Service ID validation
     if (!ObjectId.isValid(serviceId)) {
       return res.status(400).json({
         success: false,
@@ -358,6 +395,7 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
+    // 5. Appointment date validation
     if (
       typeof appointmentDate !== "string" ||
       !/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate)
@@ -368,7 +406,9 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
-    const parsedDate = new Date(`${appointmentDate}T00:00:00.000Z`);
+    const parsedDate = new Date(
+      `${appointmentDate}T00:00:00.000Z`
+    );
 
     if (
       Number.isNaN(parsedDate.getTime()) ||
@@ -393,6 +433,8 @@ app.post("/appointments", async (req, res) => {
         message: "Past dates are not allowed",
       });
     }
+
+    // 6. Allowed time slots
     const allowedTimeSlots = [
       "10:00 AM",
       "11:00 AM",
@@ -412,6 +454,7 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
+    // 7. Message validation
     if (
       message !== undefined &&
       (typeof message !== "string" || message.length > 500)
@@ -422,6 +465,7 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
+    // 8. Check service availability
     const service = await futuredCollection.findOne({
       _id: new ObjectId(serviceId),
       isActive: true,
@@ -434,6 +478,7 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
+    // 9. Check existing appointment
     const existingAppointment =
       await appointmentsCollection.findOne({
         appointmentDate,
@@ -450,6 +495,7 @@ app.post("/appointments", async (req, res) => {
       });
     }
 
+    // 10. Create new appointment
     const newAppointment = {
       userId,
       serviceId: new ObjectId(serviceId),
@@ -916,6 +962,104 @@ app.patch("/admin/appointments/:id/status", async (req, res) => {
     });
   }
 });
+app.get("/admin/users", async (req, res) => {
+  try {
+    const users = await usersCollection
+      .find(
+        {},
+        {
+          projection: {
+            name: 1,
+            email: 1,
+            role: 1,
+            image: 1,
+            createdAt: 1,
+            isBlocked: 1,
+          },
+        }
+      )
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json({
+      success: true,
+      data: users,
+    });
+  } catch (error) {
+    console.error("Get Admin Users Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch users",
+    });
+  }
+});
+
+app.patch("/admin/users/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isBlocked } = req.body;
+
+    if (typeof isBlocked !== "boolean") {
+      return res.status(400).json({
+        success: false,
+        message: "isBlocked must be true or false",
+      });
+    }
+
+    const user = await usersCollection.findOne({
+      $or: [
+        { _id: id },
+        ...(ObjectId.isValid(id)
+          ? [{ _id: new ObjectId(id) }]
+          : []),
+      ],
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    if (user.role?.toLowerCase() === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Admin cannot be blocked",
+      });
+    }
+
+    await usersCollection.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          isBlocked,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: isBlocked
+        ? "User blocked successfully"
+        : "User unblocked successfully",
+      data: {
+        ...user,
+        isBlocked,
+      },
+    });
+  } catch (error) {
+    console.error("User Status Update Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update user status",
+    });
+  }
+});
+
 
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
