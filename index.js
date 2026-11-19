@@ -596,6 +596,147 @@ app.get("/appointments/:id", async (req, res) => {
     });
   }
 });
+// Delete Customer Appointment
+app.delete("/appointments/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID",
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const result = await appointmentsCollection.deleteOne({
+      _id: new ObjectId(id),
+      userId,
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Appointment deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Appointment Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete appointment",
+    });
+  }
+});
+app.patch("/appointments/:id/reschedule", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, appointmentDate, timeSlot } = req.body;
+
+    const allowedTimeSlots = [
+      "10:00 AM",
+      "11:00 AM",
+      "12:00 PM",
+      "01:00 PM",
+      "02:00 PM",
+      "03:00 PM",
+      "04:00 PM",
+      "05:00 PM",
+      "06:00 PM",
+    ];
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid appointment ID" });
+    }
+
+    if (!userId || !appointmentDate || !timeSlot) {
+      return res.status(400).json({ success: false, message: "User, date and time are required" });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate)) {
+      return res.status(400).json({ success: false, message: "Invalid appointment date" });
+    }
+
+    if (!allowedTimeSlots.includes(timeSlot)) {
+      return res.status(400).json({ success: false, message: "Invalid time slot" });
+    }
+
+    // Bangladesh local date
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Dhaka",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+
+    if (appointmentDate < today) {
+      return res.status(400).json({ success: false, message: "Appointment date cannot be in the past" });
+    }
+
+    const appointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(id),
+      userId,
+    });
+
+    if (!appointment) {
+      return res.status(404).json({ success: false, message: "Appointment not found" });
+    }
+
+    if (appointment.status !== "Pending") {
+      return res.status(400).json({ success: false, message: "Only pending appointments can be rescheduled" });
+    }
+
+    // Check whether another active appointment has taken this slot
+    const existingAppointment = await appointmentsCollection.findOne({
+      _id: { $ne: new ObjectId(id) },
+      appointmentDate,
+      timeSlot,
+      status: { $in: ["Pending", "Confirmed"] },
+    });
+
+    if (existingAppointment) {
+      return res.status(409).json({ success: false, message: "This time slot is already booked" });
+    }
+
+    await appointmentsCollection.updateOne(
+      { _id: new ObjectId(id), userId, status: "Pending" },
+      {
+        $set: {
+          appointmentDate,
+          timeSlot,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    const updatedAppointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Appointment rescheduled successfully",
+      data: updatedAppointment,
+    });
+  } catch (error) {
+    console.error("Reschedule Appointment Error:", error);
+    return res.status(500).json({ success: false, message: "Failed to reschedule appointment" });
+  }
+});
+
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
