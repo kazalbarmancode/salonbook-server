@@ -736,6 +736,186 @@ app.patch("/appointments/:id/reschedule", async (req, res) => {
     return res.status(500).json({ success: false, message: "Failed to reschedule appointment" });
   }
 });
+// GET: ALL APPOINTMENTS FOR ADMIN
+
+app.get("/admin/appointments", async (req, res) => {
+  try {
+    const appointments = await appointmentsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const appointmentsWithDetails = await Promise.all(
+      appointments.map(async (appointment) => {
+        // Get service information
+        let service = null;
+
+        if (ObjectId.isValid(appointment.serviceId)) {
+          service = await futuredCollection.findOne({
+            _id: new ObjectId(appointment.serviceId),
+          });
+        }
+
+        // Get customer information
+        const userId = appointment.userId;
+
+        const userConditions = [
+          { _id: userId },
+          { id: userId },
+        ];
+
+        if (ObjectId.isValid(userId)) {
+          userConditions.push({
+            _id: new ObjectId(userId),
+          });
+        }
+
+        const customer = await usersCollection.findOne({
+          $or: userConditions,
+        });
+
+        return {
+          ...appointment,
+
+          // Service details
+          serviceImage: service?.image || "",
+          serviceCategory: service?.category || "N/A",
+
+          // Customer details
+          customerName:
+            customer?.name ||
+            customer?.fullName ||
+            "Unknown Customer",
+
+          customerEmail:
+            customer?.email ||
+            "Email not available",
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: appointmentsWithDetails,
+    });
+  } catch (error) {
+    console.error("Admin Appointments Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointments",
+    });
+  }
+});
+
+// PATCH: UPDATE APPOINTMENT STATUS FOR ADMIN
+app.patch("/admin/appointments/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowedStatuses = [
+      "Pending",
+      "Confirmed",
+      "Completed",
+      "Cancelled",
+    ];
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID",
+      });
+    }
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment status",
+      });
+    }
+
+    const appointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found",
+      });
+    }
+
+    if (
+      status === "Confirmed" &&
+      appointment.status !== "Pending"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Only pending appointments can be confirmed",
+      });
+    }
+
+    if (
+      status === "Completed" &&
+      appointment.status !== "Confirmed"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Only confirmed appointments can be completed",
+      });
+    }
+
+    if (
+      status === "Cancelled" &&
+      !["Pending", "Confirmed"].includes(appointment.status)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "This appointment cannot be cancelled",
+      });
+    }
+
+    const updatedAt = new Date();
+
+    const result = await appointmentsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        status: appointment.status,
+      },
+      {
+        $set: {
+          status,
+          updatedAt,
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Appointment status has already changed",
+      });
+    }
+
+    const updatedAppointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Appointment ${status.toLowerCase()} successfully`,
+      data: updatedAppointment,
+    });
+  } catch (error) {
+    console.error("Admin Update Appointment Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update appointment status",
+    });
+  }
+});
 
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
