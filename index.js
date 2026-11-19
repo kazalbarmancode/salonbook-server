@@ -6,8 +6,12 @@ import { MongoClient, ObjectId } from "mongodb";
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors());
-app.use(express.json());
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true,
+  })
+);app.use(express.json());
 
 if (!process.env.MONGODB_URL) {
   throw new Error("MONGODB_URL is missing from .env");
@@ -25,6 +29,8 @@ async function startServer() {
 
     const futuredCollection = db.collection("futured");
     const appointmentsCollection = db.collection("appointments");
+    const usersCollection = db.collection("user");
+
 
     app.get("/", (req, res) => {
       res.send("SalonBook Server is Running!");
@@ -155,7 +161,7 @@ app.post("/admin/services", async (req, res) => {
 });
 
 
-app.put("/admin/services/:id", async (req, res) => {
+app.patch("/admin/services/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -322,6 +328,166 @@ app.delete("/admin/services/:id", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to delete service",
+    });
+  }
+});
+
+// POST: BOOK APPOINTMENT
+
+app.post("/appointments", async (req, res) => {
+  try {
+    const {
+      userId,
+      serviceId,
+      appointmentDate,
+      timeSlot,
+      message,
+    } = req.body;
+
+    if (!userId || !serviceId || !appointmentDate || !timeSlot) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide all required information",
+      });
+    }
+
+    if (!ObjectId.isValid(serviceId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID",
+      });
+    }
+
+    if (
+      typeof appointmentDate !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment date",
+      });
+    }
+
+    const parsedDate = new Date(`${appointmentDate}T00:00:00.000Z`);
+
+    if (
+      Number.isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== appointmentDate
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment date",
+      });
+    }
+
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Dhaka",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+
+    if (appointmentDate < today) {
+      return res.status(400).json({
+        success: false,
+        message: "Past dates are not allowed",
+      });
+    }
+    const allowedTimeSlots = [
+      "10:00 AM",
+      "11:00 AM",
+      "12:00 PM",
+      "01:00 PM",
+      "02:00 PM",
+      "03:00 PM",
+      "04:00 PM",
+      "05:00 PM",
+      "06:00 PM",
+    ];
+
+    if (!allowedTimeSlots.includes(timeSlot)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid time slot",
+      });
+    }
+
+    if (
+      message !== undefined &&
+      (typeof message !== "string" || message.length > 500)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Message must be within 500 characters",
+      });
+    }
+
+    const service = await futuredCollection.findOne({
+      _id: new ObjectId(serviceId),
+      isActive: true,
+    });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found or unavailable",
+      });
+    }
+
+    const existingAppointment =
+      await appointmentsCollection.findOne({
+        appointmentDate,
+        timeSlot,
+        status: {
+          $in: ["Pending", "Confirmed"],
+        },
+      });
+
+    if (existingAppointment) {
+      return res.status(409).json({
+        success: false,
+        message: "This time slot is already booked",
+      });
+    }
+
+    const newAppointment = {
+      userId,
+      serviceId: new ObjectId(serviceId),
+
+      serviceName: service.name,
+      price: Number(service.price),
+      duration: service.duration,
+
+      appointmentDate,
+      timeSlot,
+      message: message?.trim() || "",
+
+      status: "Pending",
+      paymentStatus: "Unpaid",
+
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await appointmentsCollection.insertOne(
+      newAppointment
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Appointment booked successfully!",
+      data: {
+        _id: result.insertedId,
+        ...newAppointment,
+      },
+    });
+
+  } catch (error) {
+    console.error("Booking API Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to book appointment",
     });
   }
 });
