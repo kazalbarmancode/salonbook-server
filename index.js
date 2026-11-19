@@ -492,7 +492,110 @@ app.post("/appointments", async (req, res) => {
   }
 });
 
+// Get Customer Appointments
+app.get("/appointments/user/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
 
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const appointments = await appointmentsCollection
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const appointmentsWithService = await Promise.all(
+      appointments.map(async (appointment) => {
+        let service = null;
+
+        if (ObjectId.isValid(appointment.serviceId)) {
+          service = await futuredCollection.findOne({
+            _id: new ObjectId(appointment.serviceId),
+          });
+        }
+
+        return {
+          ...appointment,
+          serviceImage: service?.image || "",
+          serviceCategory: service?.category || "N/A",
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: appointmentsWithService,
+    });
+  } catch (error) {
+    console.error("Get Appointments Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointments",
+    });
+  }
+});
+
+
+app.get("/appointments/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.query;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID",
+      });
+    }
+
+    if (!userId || typeof userId !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const appointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(id),
+      userId,
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found",
+      });
+    }
+
+    const service = ObjectId.isValid(appointment.serviceId)
+      ? await futuredCollection.findOne({
+          _id: new ObjectId(appointment.serviceId),
+        })
+      : null;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...appointment,
+        serviceImage: service?.image || "",
+        serviceCategory: service?.category || "N/A",
+      },
+    });
+  } catch (error) {
+    console.error("Get Appointment Details Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointment details",
+    });
+  }
+});
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
