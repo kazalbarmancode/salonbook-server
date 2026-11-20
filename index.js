@@ -1492,6 +1492,50 @@ app.post("/payments/verify-session", async (req, res) => {
 });
 
 
+app.get("/admin/transactions", async (req, res) => {
+  try {
+    // Get all transactions
+    const transactions = await transactionsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Get customer and appointment details
+    const result = await Promise.all(
+      transactions.map(async (transaction) => {
+        const appointment = await appointmentsCollection.findOne({
+          _id: new ObjectId(transaction.appointmentId),
+        });
+
+        const user = await usersCollection.findOne({
+          _id: new ObjectId(transaction.userId),
+        });
+
+        return {
+          ...transaction,
+          _id: transaction._id.toString(),
+          customerName: user?.name || "Unknown Customer",
+          customerEmail: user?.email || "",
+          serviceName: appointment?.serviceName || "—",
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get transactions error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch transactions",
+    });
+  }
+});
+
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
