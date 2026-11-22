@@ -9,26 +9,44 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 if (!process.env.MONGODB_URL) {
-  throw new Error("MONGODB_URL is missing from .env");
+  throw new Error("MONGODB_URL is missing from environment variables");
 }
 
 if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error("STRIPE_SECRET_KEY is missing from .env");
+  throw new Error("STRIPE_SECRET_KEY is missing from environment variables");
 }
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-  }),
-);
-app.use("/payments/webhook", express.raw({ type: "application/json" }));
-
-app.use(express.json());
-
 const client = new MongoClient(process.env.MONGODB_URL);
+const db = client.db("salonbook");
+
+const futuredCollection = db.collection("futured");
+const appointmentsCollection = db.collection("appointments");
+const transactionsCollection = db.collection("transactions");
+const usersCollection = db.collection("user");
+
+let connectPromise = null;
+
+async function connectDB() {
+  if (!connectPromise) {
+    connectPromise = client
+      .connect()
+      .then(() => {
+        console.log("MongoDB Connected Successfully!");
+        return client;
+      })
+      .catch((error) => {
+        console.error("MongoDB Connection Failed:", error);
+        connectPromise = null;
+        throw error;
+      });
+  }
+
+  await connectPromise;
+  return db;
+}
+
 let cachedExchangeRate = null;
 let rateLastFetched = 0;
 
@@ -75,24 +93,39 @@ async function convertBdtToUsd(bdtAmount) {
   };
 }
 
-async function startServer() {
+// CORS
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true,
+  })
+);
+
+// Stripe webhook raw body parser must come before express.json()
+app.use("/payments/webhook", express.raw({ type: "application/json" }));
+
+app.use(express.json());
+
+// Connect MongoDB before handling API routes
+app.use(async (req, res, next) => {
   try {
-    await client.connect();
+    await connectDB();
+    next();
+  } catch (error) {
+    console.error("MongoDB Connection Failed:", error);
 
-    console.log("MongoDB Connected Successfully!");
+    return res.status(503).json({
+      success: false,
+      message: "Database connection unavailable",
+    });
+  }
+});
 
-    const db = client.db("salonbook");
-
-    const futuredCollection = db.collection("futured");
-    const appointmentsCollection = db.collection("appointments");
-    const transactionsCollection = db.collection("transactions");
-    const usersCollection = db.collection("user");
-
-    
-    const authBaseURL = process.env.BETTER_AUTH_URL;
+// Better Auth JWT configuration
+const authBaseURL = process.env.BETTER_AUTH_URL;
 
 if (!authBaseURL) {
-  throw new Error("BETTER_AUTH_URL is missing from .env");
+  throw new Error("BETTER_AUTH_URL is missing from environment variables");
 }
 
 const JWKS = createRemoteJWKSet(
@@ -184,6 +217,7 @@ const verifyAdmin = (req, res, next) => {
 
   next();
 };
+
 
     app.get("/", (req, res) => {
       res.send("SalonBook Server is Running!");
@@ -1505,15 +1539,20 @@ app.post(
   }
 );
 
-   
-app.post("/payments/webhook", async (req, res) => {
-  console.log("1. Webhook request received!");
+ app.post("/payments/webhook", async (req, res) => {
+  console.log("Stripe webhook received");
 
   const signature = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error("STRIPE_WEBHOOK_SECRET is missing");
+    return res.status(500).send("Webhook secret is missing");
+  }
 
   let event;
 
-  // Verify Stripe signature
+  // 1. Verify Stripe signature
   try {
     if (!signature || !Buffer.isBuffer(req.body)) {
       return res.status(400).send("Invalid webhook request");
@@ -1522,89 +1561,144 @@ app.post("/payments/webhook", async (req, res) => {
     event = stripe.webhooks.constructEvent(
       req.body,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET
+      webhookSecret
     );
 
-    console.log("Stripe event:", event.type);
+    console.log("Verified Stripe event:", event.type);
   } catch (error) {
     console.error("Webhook Signature Error:", error.message);
     return res.status(400).send("Webhook signature verification failed");
   }
 
+  // Handle successful checkout payment
+  if (
+    event.type !== "checkout.session.completed" &&
+    event.type !== "checkout.session.async_payment_succeeded"
+  ) {
+    return res.status(200).json({ received: true });
+  }
+
   try {
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
+    const session = event.data.object;
 
-      if (session.payment_status !== "paid") {
-        return res.status(200).json({ received: true });
-      }
-
-      const appointmentId = session.metadata?.appointmentId;
-      const userId = session.metadata?.userId;
-
-      if (!appointmentId || !userId) {
-        console.log("Missing appointment metadata");
-        return res.status(200).json({ received: true });
-      }
-
-      if (!ObjectId.isValid(appointmentId)) {
-        return res.status(400).json({ received: false });
-      }
-
-      const appointment = await appointmentsCollection.findOne({
-        _id: new ObjectId(appointmentId),
-        userId,
-      });
-
-      if (!appointment) {
-        console.error("Appointment not found:", appointmentId);
-        return res.status(404).json({ received: false });
-      }
-
-      // Update payment status only after verified Stripe payment
-      await appointmentsCollection.updateOne(
-        {
-          _id: appointment._id,
-          userId,
-          paymentStatus: { $ne: "Paid" },
-        },
-        {
-          $set: {
-            paymentStatus: "Paid",
-            stripeSessionId: session.id,
-            stripePaymentIntentId: session.payment_intent || null,
-            paidAt: new Date(),
-            updatedAt: new Date(),
-          },
-        }
-      );
-
-      // Save transaction only once
-      await transactionsCollection.updateOne(
-        { stripeSessionId: session.id },
-        {
-          $setOnInsert: {
-            appointmentId: appointment._id,
-            userId,
-            serviceName: appointment.serviceName,
-            amount: Number(session.amount_total) / 100,
-            currency: session.currency?.toUpperCase(),
-            paymentStatus: "Paid",
-            stripeSessionId: session.id,
-            stripePaymentIntentId: session.payment_intent || null,
-            createdAt: new Date(),
-          },
-        },
-        { upsert: true }
-      );
-
-      console.log("Payment and transaction processed:", session.id);
+    if (session.payment_status !== "paid") {
+      console.log("Payment is not completed:", session.id);
+      return res.status(200).json({ received: true });
     }
 
-    return res.status(200).json({ received: true });
+    const appointmentId = session.metadata?.appointmentId;
+    const userId = session.metadata?.userId;
+
+    if (!appointmentId || !userId || !ObjectId.isValid(appointmentId)) {
+      console.error("Invalid appointment metadata:", session.metadata);
+      return res.status(400).json({
+        received: false,
+        message: "Invalid appointment metadata",
+      });
+    }
+
+    // 2. Find the appointment
+    const appointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(appointmentId),
+      userId: String(userId),
+    });
+
+    if (!appointment) {
+      console.error("Appointment not found:", appointmentId);
+
+      return res.status(500).json({
+        received: false,
+        message: "Appointment not found",
+      });
+    }
+
+    // 3. Verify payment amount and currency
+    const expectedAmount = Math.round(
+      Number(appointment.usdPrice) * 100
+    );
+
+    if (
+      !Number.isFinite(expectedAmount) ||
+      expectedAmount <= 0 ||
+      session.currency !== "usd" ||
+      session.amount_total !== expectedAmount
+    ) {
+      console.error("Payment amount or currency mismatch:", {
+        sessionId: session.id,
+        expectedAmount,
+        receivedAmount: session.amount_total,
+        currency: session.currency,
+      });
+
+      return res.status(400).json({
+        received: false,
+        message: "Payment amount verification failed",
+      });
+    }
+
+    const paymentIntentId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id || null;
+
+    // 4. Update appointment payment status
+    const updateResult = await appointmentsCollection.updateOne(
+      {
+        _id: appointment._id,
+        userId: String(userId),
+      },
+      {
+        $set: {
+          paymentStatus: "Paid",
+          stripeSessionId: session.id,
+          stripePaymentIntentId: paymentIntentId,
+          paidAt: appointment.paidAt || new Date(),
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (updateResult.matchedCount === 0) {
+      throw new Error("Appointment payment update failed");
+    }
+
+    // 5. Save transaction (idempotent by Stripe session ID)
+    await transactionsCollection.updateOne(
+      {
+        stripeSessionId: session.id,
+      },
+      {
+        $setOnInsert: {
+          appointmentId: appointment._id,
+          userId: String(userId),
+          serviceName: appointment.serviceName,
+          amount: session.amount_total / 100,
+          currency: session.currency.toUpperCase(),
+          paymentStatus: "Paid",
+          stripeSessionId: session.id,
+          stripePaymentIntentId: paymentIntentId,
+          createdAt: new Date(),
+        },
+      },
+      {
+        upsert: true,
+      }
+    );
+
+    console.log("Payment successfully confirmed:", {
+      appointmentId,
+      sessionId: session.id,
+    });
+
+    return res.status(200).json({
+      received: true,
+      success: true,
+      message: "Payment confirmed successfully",
+    });
   } catch (error) {
     console.error("Webhook Processing Error:", error);
 
+    // Stripe will retry failed webhook deliveries
     return res.status(500).json({
       received: false,
       message: "Webhook processing failed",
@@ -1744,14 +1838,10 @@ app.get("/admin/transactions", verifyJWT, verifyAdmin, async (req, res) => {
 });
 
 
-    app.listen(port, () => {
-      console.log(`Server running on port ${port}`);
-    });
-  } catch (error) {
-    console.error("MongoDB Connection Failed:", error);
-    process.exit(1);
-  }
+    if (process.env.VERCEL !== "1") {
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
 }
 
-startServer();
 export default app;
