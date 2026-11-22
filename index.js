@@ -1754,3 +1754,4 @@ app.get("/admin/transactions", verifyJWT, verifyAdmin, async (req, res) => {
 }
 
 startServer();
+export default app;
