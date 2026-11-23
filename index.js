@@ -882,10 +882,10 @@ app.get("/appointments/:id", verifyJWT, async (req, res) => {
   }
 });
 
-   
-app.delete("/appointments/:id", verifyJWT, async (req, res) => {
+  app.delete("/appointments/:id", verifyJWT, async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.id;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
@@ -894,39 +894,31 @@ app.delete("/appointments/:id", verifyJWT, async (req, res) => {
       });
     }
 
-    // Only the appointment owner can cancel
-    const result = await appointmentsCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-        userId: req.user.id,
-        status: "Pending",
-        paymentStatus: "Unpaid",
-      },
-      {
-        $set: {
-          status: "Cancelled",
-          updatedAt: new Date(),
-        },
-      }
-    );
+    const result = await appointmentsCollection.deleteOne({
+      _id: new ObjectId(id),
+      userId: userId,
+      status: { $in: ["Pending", "Cancelled"] },
+      paymentStatus: "Unpaid",
+    });
 
-    if (result.matchedCount === 0) {
+    if (result.deletedCount === 0) {
       return res.status(404).json({
         success: false,
-        message: "Appointment not found or cannot be cancelled",
+        message: "Appointment not found or cannot be deleted",
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "Appointment cancelled successfully",
+      message: "Appointment deleted successfully",
     });
+
   } catch (error) {
-    console.error("Cancel Appointment Error:", error);
+    console.error("Delete Appointment Error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to cancel appointment",
+      message: "Failed to delete appointment",
     });
   }
 });
